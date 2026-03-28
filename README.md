@@ -77,6 +77,64 @@ Run `Cal_path_rate` to calculate the path rate for evaluating the results.
 
 We use the official code provided by ToolBench to calculate the win rate. You can find the calculation method in the [ToolEval](https://github.com/OpenBMB/ToolBench/blob/master/toolbench/tooleval/README.md) repo.
 
+## 📘 How the paper's core ideas are implemented in code
+
+This repository implements the main methodology of the paper *From Exploration to Mastery: Enabling LLMs to Master Tools via Self-Driven Interactions* through an iterative, feedback-driven loop in `DRAFT.py`.
+
+### 1) Three-phase trial-and-error loop (paper → code)
+
+For each API, DRAFT repeats the following phases:
+
+1. **Experience Gathering (Explorer)**
+   - Prompt file: `prompts/Explorer.txt`
+   - Code path: `process_api_info(...)`
+   - The model generates a user query + parameters, then calls the real API via `get_rapidapi_response(...)`.
+
+2. **Learning from Experience (Analyzer)**
+   - Prompt file: `prompts/Analyzer.txt`
+   - Code path: `process_api_info(...)`
+   - The model analyzes `(tool description, generated query/params, API response)` and outputs concrete suggestions for documentation improvements.
+
+3. **Documentation Rewriting (Rewriter)**
+   - Prompt file: `prompts/Rewriter.txt`
+   - Code path: `process_api_info(...)`
+   - The model rewrites the API description and also outputs "suggestions for exploring" used to guide the next exploration step.
+
+This forms the self-driven interaction cycle described in the paper: exploration produces evidence, analysis extracts lessons, rewriting updates documentation, and the updated docs feed into the next round.
+
+### 2) Diversity-promoting exploration strategy
+
+To avoid repetitive trials, DRAFT embeds each generated query and compares cosine similarity with previously explored queries. If a new query is too similar, it asks Explorer to regenerate.  
+This enforces broader coverage of tool behaviors rather than overfitting to a narrow query pattern.
+
+### 3) Tool-adaptive termination mechanism
+
+DRAFT computes a convergence score between consecutive rewritten descriptions using:
+- embedding cosine similarity (semantic closeness), and
+- BLEU score (surface-level lexical overlap).
+
+If the averaged score is high enough, the loop stops early for that API.  
+This corresponds to the paper's efficiency-oriented stopping rule that prevents unnecessary rewriting when edits have stabilized.
+
+### 4) Hierarchical rewriting: API-level then tool-level
+
+- **API-level refinement**: each API description in `tool_guidelines` is improved iteratively.
+- **Tool-level consolidation**: after API updates, `prompts/rewrite_tool_doc.txt` is used to regenerate the overall `tool_description`.
+
+This two-level rewrite keeps local API details accurate while maintaining a coherent high-level tool summary.
+
+### 5) End-to-end execution order in `DRAFT.py`
+
+1. Load Explorer/Analyzer/Rewriter prompts.
+2. Load initial tool documentation JSON.
+3. For each tool (asynchronously):
+   - for each API: run iterative exploration → analysis → rewrite loop,
+   - then rewrite whole-tool description.
+4. Save successful/failed outputs and retry queue:
+   - `DRAFT_success.json`
+   - `DRAFT_failed.json`
+   - `DRAFT_retry_queue.json`
+
 
 ## ☕️ Citation
 If you find our code or work useful for your research, please cite our work.
