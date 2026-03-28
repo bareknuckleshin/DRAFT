@@ -318,6 +318,8 @@ def get_rapidapi_response(
     tools_root: str = "data.toolenv.tools",
     schema_root: str = "data/toolenv/response_examples",
 ):
+    # LLM이 생성한 파라미터 후보를 실제 API 호출로 연결하는 브리지.
+    # DRAFT는 합성 데이터가 아닌 실제 상호작용 결과(응답/에러)로 문서를 학습적으로 개선한다.
     info = Info
     info.category = input_dict["category"]
     info.tool_name = input_dict["tool_name"]
@@ -364,6 +366,8 @@ def get_rapidapi_response(
 
 
 async def compute_similarity_and_bleu(client: APIClient, reference_sentence, candidate_sentence):
+    # 적응형 종료를 위한 하이브리드 유사도:
+    # 의미 유사도(임베딩 코사인) + 표면 문자열 유사도(BLEU).
     reference_sentence_embedding, candidate_sentence_embedding = await asyncio.gather(
         openai_embedding(client, reference_sentence),
         openai_embedding(client, candidate_sentence),
@@ -397,6 +401,12 @@ async def process_api_info(
     model: str,
     episodes: int,
 ):
+    # [논문 핵심 대응] DRAFT의 trial-and-error 핵심 루프.
+    # 논문의 3단계를 반복 수행한다:
+    # 1) Experience Gathering: Explorer가 다양한 질의/파라미터를 만들고 실제 API를 호출
+    # 2) Learning from Experience: Analyzer가 상호작용 결과에서 문서 개선 포인트를 추출
+    # 3) Documentation Rewriting: Rewriter가 설명을 갱신하고 다음 탐색 힌트를 생성
+    # episode 예산을 다 쓰거나 adaptive termination이 발동하면 종료한다.
     api_name = api_info["name"]
     last_tool_description = api_info["description"]
     required_parameters = api_info["required_parameters"]
@@ -410,6 +420,7 @@ async def process_api_info(
     suggestion_from_rewrite_agent = ""
 
     for episode in range(episodes):
+        # 현재 에피소드에서 사용할 API 설명 스냅샷(매 반복마다 갱신됨).
         tool_info = {
             "category": tool_category,
             "name": api_name,
@@ -427,6 +438,8 @@ async def process_api_info(
             )
             explore_prompt = explore_prompt + explore_prompt_follow_temp
             for _ in range(3):
+                # Diversity-promoting exploration:
+                # 임베딩 유사도(>0.9)가 높은 중복 질의를 거절하고 재생성시켜 탐색 다양성을 확보한다.
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": explore_prompt},
@@ -457,6 +470,7 @@ async def process_api_info(
         explored_queries.append(example_ans["User Query"])
         explored_queries_embeddings.append(await openai_embedding(client, example_ans["User Query"]))
 
+        # 생성된 파라미터로 실제 도구를 호출해 self-driven interaction 신호를 획득한다.
         cate = tool_category
         tool_name_std = change_name(standardize(tool_name))
         api_name_std = change_name(standardize(api_name))
@@ -474,6 +488,7 @@ async def process_api_info(
         example_ans["API_Response"] = response
         explored_examples.append(example_ans)
 
+        # Analyzer는 (설명, 질의, 파라미터, 실제 응답)에서 문서 개선 제안을 도출한다.
         suggestion_prompt_temp = suggestion_prompt.replace("{Tool Description}", tool_description)
         suggestion_prompt_temp = suggestion_prompt_temp.replace("{usage_example}", str(example_ans))
         if len(rewrite_description_history) > 1:
@@ -490,6 +505,9 @@ async def process_api_info(
         )
         suggestions.append(suggestion_ans)
 
+        # Rewriter는 Analyzer 피드백을 반영해
+        # - API 설명(다음 에피소드의 입력)을 수정하고
+        # - 다음 탐색을 위한 제안(Explorer 가이드)을 생성한다.
         rewrite_prompt_temp = rewrite_prompt.replace("{Tool Description}", tool_description)
         rewrite_prompt_temp = rewrite_prompt_temp.replace("{usage_example}", str(example_ans))
         rewrite_prompt_temp = rewrite_prompt_temp.replace(
@@ -515,12 +533,16 @@ async def process_api_info(
         rewrite_agent_history.append(rewrite_tool)
 
         if len(rewrite_description_history) > 1:
+            # Tool-adaptive termination:
+            # 연속된 두 설명이 지나치게 유사하면(의미+문자열) 수렴으로 판단해 조기 종료한다.
+            # 불필요한 반복 수정을 줄여 효율을 높이고 과도한 편집을 방지한다.
             reference_sentence = rewrite_description_history[-2]
             candidate_sentence = rewrite_description_history[-1]
             delta = await compute_similarity_and_bleu(client, reference_sentence, candidate_sentence)
             if delta > 0.75:
                 break
 
+    # 최종 개선된 API 설명을 tool_guidelines에 반영.
     api_info["description"] = rewrite_description_history[-1]
 
 
@@ -539,6 +561,7 @@ async def process_tool(
     model: str,
     episodes: int,
 ):
+    # API 단위 개선: 하나의 tool 아래 각 API endpoint를 반복적으로 정제.
     tool_category = tool["category"]
     tool_name = tool["tool_name"]
 
@@ -562,6 +585,7 @@ async def process_tool(
             episodes,
         )
 
+    # Tool 단위 재작성: API별 개선 후 전체 tool_description을 다시 생성.
     tool_doc = str(tool)
 
     with open("prompts/rewrite_tool_doc.txt", "r") as file:
@@ -586,6 +610,8 @@ async def process_tool(
 
 
 async def main():
+    # 프롬프트 3종은 논문의 3개 역할에 대응:
+    # Explorer(경험 수집), Analyzer(경험 분석), Rewriter(문서 재작성).
     with open("prompts/Explorer.txt", "r") as file:
         example_prompt_template = file.read()
         example_prompt, example_prompt_follow = example_prompt_template.split("=========")
@@ -607,6 +633,7 @@ async def main():
     model = "gpt-4o-2024-08-06"
     episodes = 5
 
+    # tool 단위 비동기 병렬 처리로 대규모 도구 집합에서도 self-driven 상호작용을 확장.
     client = APIClient(timeout_seconds=120, max_parallel=200)
 
     success_tools = []
